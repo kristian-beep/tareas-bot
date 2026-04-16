@@ -146,8 +146,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
 });
 
 // ─── Recordatorio automático cada mañana a las 8am hora CDMX ─────────────────
-cron.schedule("0 14 * * *", async () => {  // 14:00 UTC = 8:00 CDMX
-  console.log("Enviando recordatorios matutinos...");
+cron.schedule("0 13 * * *", async () => {  // 13:00 UTC = 8:00 CDMX (horario de verano)  console.log("Enviando recordatorios matutinos...");
   const today = new Date().toISOString().split("T")[0];
   const phones = await Task.distinct("phone", { status: { $ne: "completada" } });
   for (const phone of phones) {
