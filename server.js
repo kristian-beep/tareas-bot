@@ -1,4 +1,4 @@
-// server.js — Bot de tareas con MongoDB, múltiples usuarios y recordatorios
+// server.js — Bot de tareas con MongoDB, horarios, keep-alive y recordatorios
 // npm install express twilio dotenv mongoose node-cron
 
 import express from "express";
@@ -6,6 +6,7 @@ import twilio from "twilio";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import cron from "node-cron";
+import https from "https";
 dotenv.config();
 
 const app = express();
@@ -19,12 +20,13 @@ mongoose.connect(process.env.MONGODB_URI)
 
 // ─── Esquema de tareas ────────────────────────────────────────────────────────
 const taskSchema = new mongoose.Schema({
-  phone:    { type: String, required: true },  // número de WhatsApp del usuario
+  phone:    { type: String, required: true },
   title:    { type: String, required: true },
   due:      { type: String },
+  hora:     { type: String, default: "" },
   priority: { type: String, default: "media" },
   status:   { type: String, default: "pendiente" },
-  cliente:  { type: String, default: "" },     // etiqueta #cliente
+  cliente:  { type: String, default: "" },
   created:  { type: Date, default: Date.now },
 });
 const Task = mongoose.model("Task", taskSchema);
@@ -41,7 +43,35 @@ function parseDueDate(rawDate) {
     due = new Date();
     due.setDate(due.getDate() + diff);
   }
+  if (rawDate.toLowerCase().includes("hoy")) {
+    due = new Date();
+  }
+  if (rawDate.toLowerCase().includes("mañana")) {
+    due = new Date();
+    due.setDate(due.getDate() + 1);
+  }
   return due.toISOString().split("T")[0];
+}
+
+function parseHora(text) {
+  const match = text.match(/a las (\d{1,2}(?::\d{2})?)\s*(am|pm)?/i);
+  if (!match) return "";
+  let hora = match[1];
+  const ampm = match[2];
+  if (!hora.includes(":")) hora = hora + ":00";
+  if (ampm) {
+    let [h, m] = hora.split(":").map(Number);
+    if (ampm.toLowerCase() === "pm" && h < 12) h += 12;
+    if (ampm.toLowerCase() === "am" && h === 12) h = 0;
+    hora = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+  return hora;
+}
+
+function formatTask(t, i) {
+  const hora = t.hora ? ` a las ${t.hora}` : "";
+  const cliente = t.cliente ? ` #${t.cliente}` : "";
+  return `${i+1}. ${t.title}${cliente}${hora} — ${t.priority.toUpperCase()} — vence ${t.due}`;
 }
 
 async function sendWhatsApp(to, body) {
@@ -57,20 +87,18 @@ async function sendWhatsApp(to, body) {
 async function parseMessage(msg, phone) {
   const lower = msg.toLowerCase().trim();
 
-  // Ver lista (opcionalmente filtrar por cliente)
+  // Ver lista
   if (lower.startsWith("lista")) {
     const clienteMatch = msg.match(/#(\S+)/);
     const query = { phone, status: { $ne: "completada" } };
     if (clienteMatch) query.cliente = new RegExp(clienteMatch[1], "i");
-    const tasks = await Task.find(query).sort({ due: 1 });
+    const tasks = await Task.find(query).sort({ due: 1, hora: 1 });
     if (tasks.length === 0) return clienteMatch
       ? `No hay tareas pendientes para #${clienteMatch[1]}.`
       : "No tienes tareas pendientes. ¡Buen trabajo! 🎉";
     return (
       `📋 *Tareas pendientes (${tasks.length}):*\n` +
-      tasks.map((t, i) =>
-        `${i+1}. ${t.title}${t.cliente ? " #"+t.cliente : ""} — ${t.priority.toUpperCase()} — vence ${t.due}`
-      ).join("\n") +
+      tasks.map((t, i) => formatTask(t, i)).join("\n") +
       "\n\nEscribe *listo #N* para completar una."
     );
   }
@@ -88,24 +116,43 @@ async function parseMessage(msg, phone) {
   }
 
   // Nueva tarea
-  const newMatch = msg.match(
-    /(?:nueva tarea|agregar|nueva|add)[:\s]+(.+?)(?:\s+para\s+el\s+(\S+))?(?:\s+prioridad\s+(alta|media|baja))?$/i
-  );
+  const newMatch = msg.match(/^nueva tarea[:\s]+(.+)/i);
   if (newMatch) {
-    let title = newMatch[1].replace(/\s+para\s+el.*/i, "").trim();
-    const clienteMatch = title.match(/#(\S+)/);
+    let raw = newMatch[1].trim();
+
+    // Extraer cliente (#nombre)
+    const clienteMatch = raw.match(/#(\S+)/);
     const cliente = clienteMatch ? clienteMatch[1] : "";
-    title = title.replace(/#\S+/, "").trim();
-    const due = parseDueDate(newMatch[2]);
-    const priority = (newMatch[3] || "media").toLowerCase();
-    await Task.create({ phone, title, due, priority, cliente, status: "pendiente" });
+    raw = raw.replace(/#\S+/, "").trim();
+
+    // Extraer prioridad
+    const prioMatch = raw.match(/prioridad\s+(alta|media|baja)/i);
+    const priority = prioMatch ? prioMatch[1].toLowerCase() : "media";
+    raw = raw.replace(/prioridad\s+(alta|media|baja)/i, "").trim();
+
+    // Extraer hora
+    const hora = parseHora(raw);
+    raw = raw.replace(/a las \d{1,2}(?::\d{2})?\s*(?:am|pm)?/i, "").trim();
+
+    // Extraer fecha
+    const fechaMatch = raw.match(/para el?\s+(\S+)/i);
+    const due = parseDueDate(fechaMatch ? fechaMatch[1] : "");
+    raw = raw.replace(/para el?\s+\S+/i, "").trim();
+
+    // Título
+    const title = raw.replace(/,\s*$/, "").trim();
+    if (!title) return "No entendí el nombre de la tarea. Ejemplo:\n*nueva tarea: revisar contrato #García para el viernes a las 10:00 prioridad alta*";
+
+    await Task.create({ phone, title, due, hora, priority, cliente, status: "pendiente" });
+    const horaStr = hora ? ` a las ${hora}` : "";
+    const clienteStr = cliente ? ` #${cliente}` : "";
     return (
-      `✅ Tarea agregada:\n*${title}*${cliente ? " #"+cliente : ""}\n` +
+      `✅ Tarea agregada:\n*${title}*${clienteStr}${horaStr}\n` +
       `Prioridad: ${priority} | Vence: ${due}\n\nEscribe *lista* para ver todas tus tareas.`
     );
   }
 
-  // Clientes registrados
+  // Clientes
   if (lower === "clientes") {
     const tasks = await Task.find({ phone, status: { $ne: "completada" }, cliente: { $ne: "" } });
     const clientes = [...new Set(tasks.map(t => t.cliente))];
@@ -120,7 +167,7 @@ async function parseMessage(msg, phone) {
       `• *lista* — ver tareas pendientes\n` +
       `• *lista #García* — tareas de un cliente\n` +
       `• *nueva tarea: [nombre]* — agregar tarea\n` +
-      `• *nueva tarea: contrato #García para el viernes prioridad alta*\n` +
+      `• *nueva tarea: contrato #García para el viernes a las 11:00 prioridad alta*\n` +
       `• *listo #2* — marcar tarea como completada\n` +
       `• *clientes* — ver clientes con tareas activas\n` +
       `• *ayuda* — ver estos comandos`
@@ -145,8 +192,19 @@ app.post("/webhook/whatsapp", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// ─── Recordatorio automático cada mañana a las 8am hora CDMX ─────────────────
-cron.schedule("0 13 * * *", async () => {  // 13:00 UTC = 8:00 CDMX (horario de verano)  console.log("Enviando recordatorios matutinos...");
+// ─── Keep-alive: ping cada 10 minutos ────────────────────────────────────────
+cron.schedule("*/10 * * * *", () => {
+  const url = process.env.RAILWAY_URL || "https://tareas-bot-production.up.railway.app";
+  https.get(url, (res) => {
+    console.log(`Keep-alive ping: ${res.statusCode}`);
+  }).on("error", (e) => {
+    console.error("Keep-alive error:", e.message);
+  });
+});
+
+// ─── Recordatorio automático cada mañana a las 8am CDMX ──────────────────────
+cron.schedule("0 13 * * *", async () => {
+  console.log("Enviando recordatorios matutinos...");
   const today = new Date().toISOString().split("T")[0];
   const phones = await Task.distinct("phone", { status: { $ne: "completada" } });
   for (const phone of phones) {
@@ -154,13 +212,11 @@ cron.schedule("0 13 * * *", async () => {  // 13:00 UTC = 8:00 CDMX (horario de 
       phone,
       status: { $ne: "completada" },
       due: { $lte: today },
-    }).sort({ due: 1 });
+    }).sort({ due: 1, hora: 1 });
     if (tasks.length === 0) continue;
     const msg =
       `☀️ *Buenos días! Tus tareas para hoy:*\n\n` +
-      tasks.map((t, i) =>
-        `${i+1}. ${t.title}${t.cliente ? " #"+t.cliente : ""} — ${t.priority.toUpperCase()}`
-      ).join("\n") +
+      tasks.map((t, i) => formatTask(t, i)).join("\n") +
       `\n\nEscribe *lista* para ver todas tus tareas.`;
     try { await sendWhatsApp(phone, msg); } catch (e) { console.error("Error enviando a", phone, e.message); }
   }
