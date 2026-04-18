@@ -1,4 +1,4 @@
-// server.js — Bot de tareas completo v3.1
+// server.js — Bot de tareas completo v3.2
 import express from "express";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -39,6 +39,10 @@ const MESES_NOMBRE = [
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+function fechaHoyMexico() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" });
+}
+
 function formatearFecha(isoDate) {
   if (!isoDate) return "";
   const [y, m, d] = isoDate.split("-").map(Number);
@@ -47,7 +51,7 @@ function formatearFecha(isoDate) {
 
 function parseDueDate(raw) {
   if (!raw || raw.trim() === "") {
-    const d = new Date();
+    const d = new Date(fechaHoyMexico());
     d.setDate(d.getDate() + 3);
     return d.toISOString().split("T")[0];
   }
@@ -56,12 +60,12 @@ function parseDueDate(raw) {
 
   // Hoy
   if (lower === "hoy" || lower === "today") {
-    return new Date().toISOString().split("T")[0];
+    return fechaHoyMexico();
   }
 
   // Mañana
   if (lower === "mañana" || lower === "tomorrow") {
-    const d = new Date();
+    const d = new Date(fechaHoyMexico());
     d.setDate(d.getDate() + 1);
     return d.toISOString().split("T")[0];
   }
@@ -85,15 +89,14 @@ function parseDueDate(raw) {
   };
   const key = Object.keys(diasSemana).find(k => lower.includes(k));
   if (key) {
-    const hoy = new Date();
-    const diff = (diasSemana[key] - hoy.getDay() + 7) % 7 || 7;
-    const d = new Date();
-    d.setDate(d.getDate() + diff);
-    return d.toISOString().split("T")[0];
+    const hoyDate = new Date(fechaHoyMexico());
+    const diff = (diasSemana[key] - hoyDate.getDay() + 7) % 7 || 7;
+    hoyDate.setDate(hoyDate.getDate() + diff);
+    return hoyDate.toISOString().split("T")[0];
   }
 
   // Sin reconocer → 3 días
-  const d = new Date();
+  const d = new Date(fechaHoyMexico());
   d.setDate(d.getDate() + 3);
   return d.toISOString().split("T")[0];
 }
@@ -274,7 +277,7 @@ cron.schedule("*/10 * * * *", () => {
 // ─── Recordatorio 8am CDMX ───────────────────────────────────────────────────
 cron.schedule("0 13 * * *", async () => {
   console.log("Enviando recordatorios matutinos...");
-  const today = new Date().toISOString().split("T")[0];
+  const today = fechaHoyMexico();
   const phones = await Task.distinct("phone", { status: { $ne: "completada" } });
   for (const phone of phones) {
     const tasks = await Task.find({
