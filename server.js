@@ -1,4 +1,4 @@
-// server.js — Bot de tareas completo v3
+// server.js — Bot de tareas completo v3.1
 import express from "express";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -19,7 +19,7 @@ mongoose.connect(process.env.MONGODB_URI)
 const taskSchema = new mongoose.Schema({
   phone:    { type: String, required: true },
   title:    { type: String, required: true },
-  due:      { type: String },           // formato ISO: 2026-04-22
+  due:      { type: String },
   hora:     { type: String, default: "" },
   priority: { type: String, default: "media" },
   status:   { type: String, default: "pendiente" },
@@ -28,17 +28,17 @@ const taskSchema = new mongoose.Schema({
 });
 const Task = mongoose.model("Task", taskSchema);
 
-// ─── Helpers de fecha ─────────────────────────────────────────────────────────
+// ─── Meses ────────────────────────────────────────────────────────────────────
 const MESES = {
   enero:1, febrero:2, marzo:3, abril:4, mayo:5, junio:6,
   julio:7, agosto:8, septiembre:9, octubre:10, noviembre:11, diciembre:12
 };
-
 const MESES_NOMBRE = [
   "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
   "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
 ];
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatearFecha(isoDate) {
   if (!isoDate) return "";
   const [y, m, d] = isoDate.split("-").map(Number);
@@ -46,14 +46,28 @@ function formatearFecha(isoDate) {
 }
 
 function parseDueDate(raw) {
-  if (!raw) {
-    const d = new Date(); d.setDate(d.getDate() + 3);
+  if (!raw || raw.trim() === "") {
+    const d = new Date();
+    d.setDate(d.getDate() + 3);
     return d.toISOString().split("T")[0];
   }
+
   const lower = raw.toLowerCase().trim();
 
+  // Hoy
+  if (lower === "hoy" || lower === "today") {
+    return new Date().toISOString().split("T")[0];
+  }
+
+  // Mañana
+  if (lower === "mañana" || lower === "tomorrow") {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().split("T")[0];
+  }
+
   // Fecha completa: "22 de abril de 2026" o "22 de abril"
-  const completa = lower.match(/(\d{1,2})\s+de\s+(\w+)(?:\s+de\s+(\d{4}))?/);
+  const completa = lower.match(/^(\d{1,2})\s+de\s+(\w+)(?:\s+de\s+(\d{4}))?$/);
   if (completa) {
     const dia = parseInt(completa[1]);
     const mes = MESES[completa[2]];
@@ -64,23 +78,23 @@ function parseDueDate(raw) {
     }
   }
 
-  // Día de la semana: "miércoles", "viernes"
-  const dias = { lunes:1, martes:2, "miércoles":3, jueves:4, viernes:5, "sábado":6, domingo:0 };
-  const key = Object.keys(dias).find(k => lower.includes(k));
+  // Día de la semana
+  const diasSemana = {
+    lunes:1, martes:2, "miércoles":3,
+    jueves:4, viernes:5, "sábado":6, domingo:0
+  };
+  const key = Object.keys(diasSemana).find(k => lower.includes(k));
   if (key) {
     const hoy = new Date();
-    const diff = (dias[key] - hoy.getDay() + 7) % 7 || 7;
-    const d = new Date(); d.setDate(d.getDate() + diff);
+    const diff = (diasSemana[key] - hoy.getDay() + 7) % 7 || 7;
+    const d = new Date();
+    d.setDate(d.getDate() + diff);
     return d.toISOString().split("T")[0];
   }
 
-  if (lower.includes("hoy")) return new Date().toISOString().split("T")[0];
-  if (lower.includes("mañana")) {
-    const d = new Date(); d.setDate(d.getDate() + 1);
-    return d.toISOString().split("T")[0];
-  }
-
-  const d = new Date(); d.setDate(d.getDate() + 3);
+  // Sin reconocer → 3 días
+  const d = new Date();
+  d.setDate(d.getDate() + 3);
   return d.toISOString().split("T")[0];
 }
 
@@ -151,7 +165,7 @@ async function parseMessage(msg, phone) {
   if (lower.startsWith("nueva tarea")) {
     let raw = msg.replace(/^nueva tarea[:\s]*/i, "").trim();
 
-    // Extraer cliente (#nombre) — solo la primera palabra después del #
+    // Extraer cliente (#nombre)
     const clienteMatch = raw.match(/#(\S+)/);
     const cliente = clienteMatch ? clienteMatch[1] : "";
     raw = raw.replace(/#\S+/, "").trim();
@@ -165,19 +179,30 @@ async function parseMessage(msg, phone) {
     const hora = parseHora(raw);
     raw = raw.replace(/a las \d{1,2}(?::\d{2})?\s*(?:am|pm)?/i, "").trim();
 
-    // Extraer fecha completa "22 de abril de 2026"
+    // Extraer fecha
     let fechaRaw = "";
+
+    // Fecha completa: "22 de abril de 2026" o "22 de abril"
     const fechaCompleta = raw.match(/\d{1,2}\s+de\s+\w+(?:\s+de\s+\d{4})?/i);
     if (fechaCompleta) {
       fechaRaw = fechaCompleta[0];
       raw = raw.replace(fechaCompleta[0], "").trim();
-    } else {
-      // Extraer "para el [día]"
+    }
+    // "para el hoy", "para el mañana", "para el viernes"
+    else if (/para el?\s+\S+/i.test(raw)) {
       const paraEl = raw.match(/para el?\s+(\S+)/i);
-      if (paraEl) {
-        fechaRaw = paraEl[1];
-        raw = raw.replace(/para el?\s+\S+/i, "").trim();
-      }
+      fechaRaw = paraEl[1];
+      raw = raw.replace(/para el?\s+\S+/i, "").trim();
+    }
+    // Solo "hoy" sin "para el"
+    else if (/\bhoy\b/i.test(raw)) {
+      fechaRaw = "hoy";
+      raw = raw.replace(/\bhoy\b/i, "").trim();
+    }
+    // Solo "mañana" sin "para el"
+    else if (/\bmañana\b/i.test(raw)) {
+      fechaRaw = "mañana";
+      raw = raw.replace(/\bmañana\b/i, "").trim();
     }
 
     const due = parseDueDate(fechaRaw);
