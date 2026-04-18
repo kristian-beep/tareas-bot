@@ -1,6 +1,4 @@
-// server.js — Bot de tareas con MongoDB, horarios, keep-alive y recordatorios
-// npm install express twilio dotenv mongoose node-cron
-
+// server.js — Bot de tareas completo v3
 import express from "express";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -13,16 +11,15 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 const { MessagingResponse } = twilio.twiml;
 
-// ─── Conexión a MongoDB ───────────────────────────────────────────────────────
+// ─── MongoDB ──────────────────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log("MongoDB conectado"))
   .catch(err => console.error("Error MongoDB:", err));
 
-// ─── Esquema de tareas ────────────────────────────────────────────────────────
 const taskSchema = new mongoose.Schema({
   phone:    { type: String, required: true },
   title:    { type: String, required: true },
-  due:      { type: String },
+  due:      { type: String },           // formato ISO: 2026-04-22
   hora:     { type: String, default: "" },
   priority: { type: String, default: "media" },
   status:   { type: String, default: "pendiente" },
@@ -31,26 +28,60 @@ const taskSchema = new mongoose.Schema({
 });
 const Task = mongoose.model("Task", taskSchema);
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function parseDueDate(rawDate) {
-  let due = new Date();
-  due.setDate(due.getDate() + 3);
-  if (!rawDate) return due.toISOString().split("T")[0];
-  const days = { lunes:1, martes:2, "miércoles":3, jueves:4, viernes:5, "sábado":6, domingo:0 };
-  const key = Object.keys(days).find(k => rawDate.toLowerCase().includes(k));
+// ─── Helpers de fecha ─────────────────────────────────────────────────────────
+const MESES = {
+  enero:1, febrero:2, marzo:3, abril:4, mayo:5, junio:6,
+  julio:7, agosto:8, septiembre:9, octubre:10, noviembre:11, diciembre:12
+};
+
+const MESES_NOMBRE = [
+  "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+];
+
+function formatearFecha(isoDate) {
+  if (!isoDate) return "";
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return `${d} de ${MESES_NOMBRE[m]} de ${y}`;
+}
+
+function parseDueDate(raw) {
+  if (!raw) {
+    const d = new Date(); d.setDate(d.getDate() + 3);
+    return d.toISOString().split("T")[0];
+  }
+  const lower = raw.toLowerCase().trim();
+
+  // Fecha completa: "22 de abril de 2026" o "22 de abril"
+  const completa = lower.match(/(\d{1,2})\s+de\s+(\w+)(?:\s+de\s+(\d{4}))?/);
+  if (completa) {
+    const dia = parseInt(completa[1]);
+    const mes = MESES[completa[2]];
+    const anio = completa[3] ? parseInt(completa[3]) : new Date().getFullYear();
+    if (mes) {
+      const fecha = new Date(anio, mes - 1, dia);
+      return fecha.toISOString().split("T")[0];
+    }
+  }
+
+  // Día de la semana: "miércoles", "viernes"
+  const dias = { lunes:1, martes:2, "miércoles":3, jueves:4, viernes:5, "sábado":6, domingo:0 };
+  const key = Object.keys(dias).find(k => lower.includes(k));
   if (key) {
-    const diff = (days[key] - new Date().getDay() + 7) % 7 || 7;
-    due = new Date();
-    due.setDate(due.getDate() + diff);
+    const hoy = new Date();
+    const diff = (dias[key] - hoy.getDay() + 7) % 7 || 7;
+    const d = new Date(); d.setDate(d.getDate() + diff);
+    return d.toISOString().split("T")[0];
   }
-  if (rawDate.toLowerCase().includes("hoy")) {
-    due = new Date();
+
+  if (lower.includes("hoy")) return new Date().toISOString().split("T")[0];
+  if (lower.includes("mañana")) {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    return d.toISOString().split("T")[0];
   }
-  if (rawDate.toLowerCase().includes("mañana")) {
-    due = new Date();
-    due.setDate(due.getDate() + 1);
-  }
-  return due.toISOString().split("T")[0];
+
+  const d = new Date(); d.setDate(d.getDate() + 3);
+  return d.toISOString().split("T")[0];
 }
 
 function parseHora(text) {
@@ -58,12 +89,12 @@ function parseHora(text) {
   if (!match) return "";
   let hora = match[1];
   const ampm = match[2];
-  if (!hora.includes(":")) hora = hora + ":00";
+  if (!hora.includes(":")) hora += ":00";
   if (ampm) {
     let [h, m] = hora.split(":").map(Number);
     if (ampm.toLowerCase() === "pm" && h < 12) h += 12;
     if (ampm.toLowerCase() === "am" && h === 12) h = 0;
-    hora = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    hora = `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`;
   }
   return hora;
 }
@@ -71,7 +102,8 @@ function parseHora(text) {
 function formatTask(t, i) {
   const hora = t.hora ? ` a las ${t.hora}` : "";
   const cliente = t.cliente ? ` #${t.cliente}` : "";
-  return `${i+1}. ${t.title}${cliente}${hora} — ${t.priority.toUpperCase()} — vence ${t.due}`;
+  const fecha = formatearFecha(t.due);
+  return `${i+1}. ${t.title}${cliente}${hora} — ${t.priority.toUpperCase()} — vence ${fecha}`;
 }
 
 async function sendWhatsApp(to, body) {
@@ -83,11 +115,11 @@ async function sendWhatsApp(to, body) {
   });
 }
 
-// ─── Procesador de mensajes ───────────────────────────────────────────────────
+// ─── Parser de mensajes ───────────────────────────────────────────────────────
 async function parseMessage(msg, phone) {
   const lower = msg.toLowerCase().trim();
 
-  // Ver lista
+  // Lista
   if (lower.startsWith("lista")) {
     const clienteMatch = msg.match(/#(\S+)/);
     const query = { phone, status: { $ne: "completada" } };
@@ -103,7 +135,7 @@ async function parseMessage(msg, phone) {
     );
   }
 
-  // Marcar como completada
+  // Completar tarea
   const doneMatch = lower.match(/^(listo|done|completada?)\s*#?(\d+)/);
   if (doneMatch) {
     const idx = parseInt(doneMatch[2]) - 1;
@@ -116,11 +148,10 @@ async function parseMessage(msg, phone) {
   }
 
   // Nueva tarea
-  const newMatch = msg.match(/^nueva tarea[:\s]+(.+)/i);
-  if (newMatch) {
-    let raw = newMatch[1].trim();
+  if (lower.startsWith("nueva tarea")) {
+    let raw = msg.replace(/^nueva tarea[:\s]*/i, "").trim();
 
-    // Extraer cliente (#nombre)
+    // Extraer cliente (#nombre) — solo la primera palabra después del #
     const clienteMatch = raw.match(/#(\S+)/);
     const cliente = clienteMatch ? clienteMatch[1] : "";
     raw = raw.replace(/#\S+/, "").trim();
@@ -134,21 +165,36 @@ async function parseMessage(msg, phone) {
     const hora = parseHora(raw);
     raw = raw.replace(/a las \d{1,2}(?::\d{2})?\s*(?:am|pm)?/i, "").trim();
 
-    // Extraer fecha
-    const fechaMatch = raw.match(/para el?\s+(\S+)/i);
-    const due = parseDueDate(fechaMatch ? fechaMatch[1] : "");
-    raw = raw.replace(/para el?\s+\S+/i, "").trim();
+    // Extraer fecha completa "22 de abril de 2026"
+    let fechaRaw = "";
+    const fechaCompleta = raw.match(/\d{1,2}\s+de\s+\w+(?:\s+de\s+\d{4})?/i);
+    if (fechaCompleta) {
+      fechaRaw = fechaCompleta[0];
+      raw = raw.replace(fechaCompleta[0], "").trim();
+    } else {
+      // Extraer "para el [día]"
+      const paraEl = raw.match(/para el?\s+(\S+)/i);
+      if (paraEl) {
+        fechaRaw = paraEl[1];
+        raw = raw.replace(/para el?\s+\S+/i, "").trim();
+      }
+    }
 
-    // Título
+    const due = parseDueDate(fechaRaw);
     const title = raw.replace(/,\s*$/, "").trim();
-    if (!title) return "No entendí el nombre de la tarea. Ejemplo:\n*nueva tarea: revisar contrato #García para el viernes a las 10:00 prioridad alta*";
+
+    if (!title) return "No entendí el nombre de la tarea. Ejemplo:\n*nueva tarea: Audiencia Juzgado 21 CA 123/2025 #Costco 22 de abril de 2026 a las 10:00 prioridad alta*";
 
     await Task.create({ phone, title, due, hora, priority, cliente, status: "pendiente" });
+
     const horaStr = hora ? ` a las ${hora}` : "";
     const clienteStr = cliente ? ` #${cliente}` : "";
+    const fechaStr = formatearFecha(due);
+
     return (
-      `✅ Tarea agregada:\n*${title}*${clienteStr}${horaStr}\n` +
-      `Prioridad: ${priority} | Vence: ${due}\n\nEscribe *lista* para ver todas tus tareas.`
+      `✅ *Tarea agregada:*\n${title}${clienteStr}${horaStr}\n` +
+      `Prioridad: ${priority} | Vence: ${fechaStr}\n\n` +
+      `Escribe *lista* para ver todas tus tareas.`
     );
   }
 
@@ -167,7 +213,7 @@ async function parseMessage(msg, phone) {
       `• *lista* — ver tareas pendientes\n` +
       `• *lista #García* — tareas de un cliente\n` +
       `• *nueva tarea: [nombre]* — agregar tarea\n` +
-      `• *nueva tarea: contrato #García para el viernes a las 11:00 prioridad alta*\n` +
+      `• *nueva tarea: Audiencia Juzgado 21 CA 123/2025 #Costco 22 de abril de 2026 a las 10:00 prioridad alta*\n` +
       `• *listo #2* — marcar tarea como completada\n` +
       `• *clientes* — ver clientes con tareas activas\n` +
       `• *ayuda* — ver estos comandos`
@@ -177,7 +223,7 @@ async function parseMessage(msg, phone) {
   return `No entendí ese mensaje 🤔\nEscribe *ayuda* para ver los comandos disponibles.`;
 }
 
-// ─── Webhook WhatsApp ─────────────────────────────────────────────────────────
+// ─── Webhook ──────────────────────────────────────────────────────────────────
 app.post("/webhook/whatsapp", async (req, res) => {
   const msg   = req.body.Body || "";
   const phone = (req.body.From || "").replace("whatsapp:", "");
@@ -192,38 +238,33 @@ app.post("/webhook/whatsapp", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// ─── Keep-alive: ping cada 10 minutos ────────────────────────────────────────
+// ─── Keep-alive ───────────────────────────────────────────────────────────────
 cron.schedule("*/10 * * * *", () => {
   const url = process.env.RAILWAY_URL || "https://tareas-bot-production.up.railway.app";
   https.get(url, (res) => {
     console.log(`Keep-alive ping: ${res.statusCode}`);
-  }).on("error", (e) => {
-    console.error("Keep-alive error:", e.message);
-  });
+  }).on("error", (e) => console.error("Keep-alive error:", e.message));
 });
 
-// ─── Recordatorio automático cada mañana a las 8am CDMX ──────────────────────
+// ─── Recordatorio 8am CDMX ───────────────────────────────────────────────────
 cron.schedule("0 13 * * *", async () => {
   console.log("Enviando recordatorios matutinos...");
   const today = new Date().toISOString().split("T")[0];
   const phones = await Task.distinct("phone", { status: { $ne: "completada" } });
   for (const phone of phones) {
     const tasks = await Task.find({
-      phone,
-      status: { $ne: "completada" },
-      due: { $lte: today },
+      phone, status: { $ne: "completada" }, due: { $lte: today },
     }).sort({ due: 1, hora: 1 });
     if (tasks.length === 0) continue;
     const msg =
       `☀️ *Buenos días! Tus tareas para hoy:*\n\n` +
       tasks.map((t, i) => formatTask(t, i)).join("\n") +
       `\n\nEscribe *lista* para ver todas tus tareas.`;
-    try { await sendWhatsApp(phone, msg); } catch (e) { console.error("Error enviando a", phone, e.message); }
+    try { await sendWhatsApp(phone, msg); } catch (e) { console.error("Error:", e.message); }
   }
 }, { timezone: "America/Mexico_City" });
 
-// ─── Ruta de salud ────────────────────────────────────────────────────────────
+// ─── Servidor ─────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("Bot de tareas activo ✓"));
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => console.log(`Servidor corriendo en puerto ${PORT}`));
