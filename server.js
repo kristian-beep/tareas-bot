@@ -1,4 +1,4 @@
-// server.js — Bot de tareas completo v3.2
+// server.js — Bot de tareas completo v3.3
 import express from "express";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -55,38 +55,21 @@ function parseDueDate(raw) {
     d.setDate(d.getDate() + 3);
     return d.toISOString().split("T")[0];
   }
-
   const lower = raw.toLowerCase().trim();
-
-  // Hoy
-  if (lower === "hoy" || lower === "today") {
-    return fechaHoyMexico();
-  }
-
-  // Mañana
+  if (lower === "hoy" || lower === "today") return fechaHoyMexico();
   if (lower === "mañana" || lower === "tomorrow") {
     const d = new Date(fechaHoyMexico());
     d.setDate(d.getDate() + 1);
     return d.toISOString().split("T")[0];
   }
-
-  // Fecha completa: "22 de abril de 2026" o "22 de abril"
   const completa = lower.match(/^(\d{1,2})\s+de\s+(\w+)(?:\s+de\s+(\d{4}))?$/);
   if (completa) {
     const dia = parseInt(completa[1]);
     const mes = MESES[completa[2]];
     const anio = completa[3] ? parseInt(completa[3]) : new Date().getFullYear();
-    if (mes) {
-      const fecha = new Date(anio, mes - 1, dia);
-      return fecha.toISOString().split("T")[0];
-    }
+    if (mes) return new Date(anio, mes - 1, dia).toISOString().split("T")[0];
   }
-
-  // Día de la semana
-  const diasSemana = {
-    lunes:1, martes:2, "miércoles":3,
-    jueves:4, viernes:5, "sábado":6, domingo:0
-  };
+  const diasSemana = { lunes:1, martes:2, "miércoles":3, jueves:4, viernes:5, "sábado":6, domingo:0 };
   const key = Object.keys(diasSemana).find(k => lower.includes(k));
   if (key) {
     const hoyDate = new Date(fechaHoyMexico());
@@ -94,8 +77,6 @@ function parseDueDate(raw) {
     hoyDate.setDate(hoyDate.getDate() + diff);
     return hoyDate.toISOString().split("T")[0];
   }
-
-  // Sin reconocer → 3 días
   const d = new Date(fechaHoyMexico());
   d.setDate(d.getDate() + 3);
   return d.toISOString().split("T")[0];
@@ -148,7 +129,7 @@ async function parseMessage(msg, phone) {
     return (
       `📋 *Tareas pendientes (${tasks.length}):*\n` +
       tasks.map((t, i) => formatTask(t, i)).join("\n") +
-      "\n\nEscribe *listo #N* para completar una."
+      "\n\nEscribe *listo #N* para completar una o *eliminar #N* para borrarla."
     );
   }
 
@@ -164,46 +145,47 @@ async function parseMessage(msg, phone) {
     return `No encontré la tarea #${doneMatch[2]}. Escribe *lista* para ver tus tareas.`;
   }
 
+  // Eliminar tarea
+  const eliminarMatch = lower.match(/^(eliminar|borrar|delete)\s*#?(\d+)/);
+  if (eliminarMatch) {
+    const idx = parseInt(eliminarMatch[2]) - 1;
+    const tasks = await Task.find({ phone, status: { $ne: "completada" } }).sort({ due: 1 });
+    if (tasks[idx]) {
+      const titulo = tasks[idx].title;
+      await Task.findByIdAndDelete(tasks[idx]._id);
+      return `🗑️ Eliminada: "${titulo}"`;
+    }
+    return `No encontré la tarea #${eliminarMatch[2]}. Escribe *lista* para ver tus tareas.`;
+  }
+
   // Nueva tarea
   if (lower.startsWith("nueva tarea")) {
     let raw = msg.replace(/^nueva tarea[:\s]*/i, "").trim();
 
-    // Extraer cliente (#nombre)
     const clienteMatch = raw.match(/#(\S+)/);
     const cliente = clienteMatch ? clienteMatch[1] : "";
     raw = raw.replace(/#\S+/, "").trim();
 
-    // Extraer prioridad
     const prioMatch = raw.match(/prioridad\s+(alta|media|baja)/i);
     const priority = prioMatch ? prioMatch[1].toLowerCase() : "media";
     raw = raw.replace(/prioridad\s+(alta|media|baja)/i, "").trim();
 
-    // Extraer hora
     const hora = parseHora(raw);
     raw = raw.replace(/a las \d{1,2}(?::\d{2})?\s*(?:am|pm)?/i, "").trim();
 
-    // Extraer fecha
     let fechaRaw = "";
-
-    // Fecha completa: "22 de abril de 2026" o "22 de abril"
     const fechaCompleta = raw.match(/\d{1,2}\s+de\s+\w+(?:\s+de\s+\d{4})?/i);
     if (fechaCompleta) {
       fechaRaw = fechaCompleta[0];
       raw = raw.replace(fechaCompleta[0], "").trim();
-    }
-    // "para el hoy", "para el mañana", "para el viernes"
-    else if (/para el?\s+\S+/i.test(raw)) {
+    } else if (/para el?\s+\S+/i.test(raw)) {
       const paraEl = raw.match(/para el?\s+(\S+)/i);
       fechaRaw = paraEl[1];
       raw = raw.replace(/para el?\s+\S+/i, "").trim();
-    }
-    // Solo "hoy" sin "para el"
-    else if (/\bhoy\b/i.test(raw)) {
+    } else if (/\bhoy\b/i.test(raw)) {
       fechaRaw = "hoy";
       raw = raw.replace(/\bhoy\b/i, "").trim();
-    }
-    // Solo "mañana" sin "para el"
-    else if (/\bmañana\b/i.test(raw)) {
+    } else if (/\bmañana\b/i.test(raw)) {
       fechaRaw = "mañana";
       raw = raw.replace(/\bmañana\b/i, "").trim();
     }
@@ -217,11 +199,9 @@ async function parseMessage(msg, phone) {
 
     const horaStr = hora ? ` a las ${hora}` : "";
     const clienteStr = cliente ? ` #${cliente}` : "";
-    const fechaStr = formatearFecha(due);
-
     return (
       `✅ *Tarea agregada:*\n${title}${clienteStr}${horaStr}\n` +
-      `Prioridad: ${priority} | Vence: ${fechaStr}\n\n` +
+      `Prioridad: ${priority} | Vence: ${formatearFecha(due)}\n\n` +
       `Escribe *lista* para ver todas tus tareas.`
     );
   }
@@ -243,6 +223,7 @@ async function parseMessage(msg, phone) {
       `• *nueva tarea: [nombre]* — agregar tarea\n` +
       `• *nueva tarea: Audiencia Juzgado 21 CA 123/2025 #Costco 22 de abril de 2026 a las 10:00 prioridad alta*\n` +
       `• *listo #2* — marcar tarea como completada\n` +
+      `• *eliminar #2* — borrar una tarea\n` +
       `• *clientes* — ver clientes con tareas activas\n` +
       `• *ayuda* — ver estos comandos`
     );
