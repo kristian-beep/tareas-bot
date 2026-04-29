@@ -1,4 +1,4 @@
-// server.js — Bot de tareas completo v3.3
+// server.js — Bot de tareas completo v3.4
 import express from "express";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -129,7 +129,7 @@ async function parseMessage(msg, phone) {
     return (
       `📋 *Tareas pendientes (${tasks.length}):*\n` +
       tasks.map((t, i) => formatTask(t, i)).join("\n") +
-      "\n\nEscribe *listo #N* para completar una o *eliminar #N* para borrarla."
+      "\n\nEscribe *listo #N*, *eliminar #N* o *editar #N campo valor*."
     );
   }
 
@@ -156,6 +156,53 @@ async function parseMessage(msg, phone) {
       return `🗑️ Eliminada: "${titulo}"`;
     }
     return `No encontré la tarea #${eliminarMatch[2]}. Escribe *lista* para ver tus tareas.`;
+  }
+
+  // Editar tarea
+  // Formatos:
+  // editar #2 fecha 25 de abril de 2026
+  // editar #2 hora 11:00
+  // editar #2 prioridad alta
+  // editar #2 cliente García
+  // editar #2 nombre Nuevo nombre de la tarea
+  const editarMatch = lower.match(/^editar\s*#?(\d+)\s+(\w+)\s+(.+)/);
+  if (editarMatch) {
+    const idx = parseInt(editarMatch[1]) - 1;
+    const campo = editarMatch[2].toLowerCase();
+    const valor = msg.match(/^editar\s*#?\d+\s+\w+\s+(.+)/i)?.[1]?.trim();
+    const tasks = await Task.find({ phone, status: { $ne: "completada" } }).sort({ due: 1 });
+
+    if (!tasks[idx]) return `No encontré la tarea #${editarMatch[1]}. Escribe *lista* para ver tus tareas.`;
+
+    const task = tasks[idx];
+    let update = {};
+    let confirmacion = "";
+
+    if (campo === "fecha") {
+      const nuevaFecha = parseDueDate(valor);
+      update = { due: nuevaFecha };
+      confirmacion = `📅 Fecha actualizada a: ${formatearFecha(nuevaFecha)}`;
+    } else if (campo === "hora") {
+      const nuevaHora = parseHora(`a las ${valor}`);
+      update = { hora: nuevaHora };
+      confirmacion = `🕐 Hora actualizada a: ${nuevaHora}`;
+    } else if (campo === "prioridad") {
+      const prio = valor.toLowerCase();
+      if (!["alta", "media", "baja"].includes(prio)) return "Prioridad debe ser: alta, media o baja.";
+      update = { priority: prio };
+      confirmacion = `⚡ Prioridad actualizada a: ${prio.toUpperCase()}`;
+    } else if (campo === "cliente") {
+      update = { cliente: valor.replace("#", "") };
+      confirmacion = `👤 Cliente actualizado a: #${valor.replace("#", "")}`;
+    } else if (campo === "nombre") {
+      update = { title: valor };
+      confirmacion = `✏️ Nombre actualizado a: "${valor}"`;
+    } else {
+      return `Campo no reconocido. Puedes editar:\n• *fecha* — nueva fecha\n• *hora* — nueva hora\n• *prioridad* — alta, media o baja\n• *cliente* — nuevo cliente\n• *nombre* — nuevo nombre`;
+    }
+
+    await Task.findByIdAndUpdate(task._id, update);
+    return `${confirmacion}\n\nTarea: "${task.title}"\nEscribe *lista* para ver tus tareas.`;
   }
 
   // Nueva tarea
@@ -224,6 +271,11 @@ async function parseMessage(msg, phone) {
       `• *nueva tarea: Audiencia Juzgado 21 CA 123/2025 #Costco 22 de abril de 2026 a las 10:00 prioridad alta*\n` +
       `• *listo #2* — marcar tarea como completada\n` +
       `• *eliminar #2* — borrar una tarea\n` +
+      `• *editar #2 fecha 25 de abril de 2026* — cambiar fecha\n` +
+      `• *editar #2 hora 11:00* — cambiar hora\n` +
+      `• *editar #2 prioridad alta* — cambiar prioridad\n` +
+      `• *editar #2 cliente García* — cambiar cliente\n` +
+      `• *editar #2 nombre Nuevo nombre* — cambiar nombre\n` +
       `• *clientes* — ver clientes con tareas activas\n` +
       `• *ayuda* — ver estos comandos`
     );
