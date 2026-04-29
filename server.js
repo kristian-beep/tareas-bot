@@ -1,4 +1,4 @@
-// server.js — Bot de tareas completo v3.4
+// server.js — Bot de tareas completo v3.5
 import express from "express";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -17,16 +17,28 @@ mongoose.connect(process.env.MONGODB_URI)
   .catch(err => console.error("Error MongoDB:", err));
 
 const taskSchema = new mongoose.Schema({
-  phone:    { type: String, required: true },
-  title:    { type: String, required: true },
-  due:      { type: String },
-  hora:     { type: String, default: "" },
-  priority: { type: String, default: "media" },
-  status:   { type: String, default: "pendiente" },
-  cliente:  { type: String, default: "" },
-  created:  { type: Date, default: Date.now },
+  phone:       { type: String, required: true },
+  title:       { type: String, required: true },
+  due:         { type: String },
+  hora:        { type: String, default: "" },
+  priority:    { type: String, default: "media" },
+  status:      { type: String, default: "pendiente" },
+  cliente:     { type: String, default: "" },
+  asignado_a:  { type: String, default: "" },  // número de teléfono del asignado
+  asignado_nombre: { type: String, default: "" }, // nombre del asignado (@Gabriela)
+  created:     { type: Date, default: Date.now },
 });
 const Task = mongoose.model("Task", taskSchema);
+
+// ─── Directorio de usuarios del despacho ─────────────────────────────────────
+// Agrega aquí los números de WhatsApp de cada miembro del despacho
+const EQUIPO = {
+  "@gabriela":  "+523316056355",
+  "@kristian":  "+523335554865",
+  "@jose":      "+523313547943",
+  "@estefani":  "+523319042984",
+  "@javier":    "+525581000410",
+};
 
 // ─── Meses ────────────────────────────────────────────────────────────────────
 const MESES = {
@@ -101,7 +113,8 @@ function formatTask(t, i) {
   const hora = t.hora ? ` a las ${t.hora}` : "";
   const cliente = t.cliente ? ` #${t.cliente}` : "";
   const fecha = formatearFecha(t.due);
-  return `${i+1}. ${t.title}${cliente}${hora} — ${t.priority.toUpperCase()} — vence ${fecha}`;
+  const asignado = t.asignado_nombre ? ` → ${t.asignado_nombre}` : "";
+  return `${i+1}. ${t.title}${cliente}${hora}${asignado} — ${t.priority.toUpperCase()} — vence ${fecha}`;
 }
 
 async function sendWhatsApp(to, body) {
@@ -133,6 +146,25 @@ async function parseMessage(msg, phone) {
     );
   }
 
+  // Ver completadas
+  if (lower.startsWith("completadas")) {
+    const clienteMatch = msg.match(/#(\S+)/);
+    const query = { phone, status: "completada" };
+    if (clienteMatch) query.cliente = new RegExp(clienteMatch[1], "i");
+    const tasks = await Task.find(query).sort({ created: -1 }).limit(20);
+    if (tasks.length === 0) return clienteMatch
+      ? `No hay tareas completadas para #${clienteMatch[1]}.`
+      : "No tienes tareas completadas aún.";
+    return (
+      `✅ *Tareas completadas (últimas ${tasks.length}):*\n` +
+      tasks.map((t, i) => {
+        const cliente = t.cliente ? ` #${t.cliente}` : "";
+        const fecha = formatearFecha(t.due);
+        return `${i+1}. ${t.title}${cliente} — vencía ${fecha}`;
+      }).join("\n")
+    );
+  }
+
   // Completar tarea
   const doneMatch = lower.match(/^(listo|done|completada?)\s*#?(\d+)/);
   if (doneMatch) {
@@ -159,25 +191,16 @@ async function parseMessage(msg, phone) {
   }
 
   // Editar tarea
-  // Formatos:
-  // editar #2 fecha 25 de abril de 2026
-  // editar #2 hora 11:00
-  // editar #2 prioridad alta
-  // editar #2 cliente García
-  // editar #2 nombre Nuevo nombre de la tarea
   const editarMatch = lower.match(/^editar\s*#?(\d+)\s+(\w+)\s+(.+)/);
   if (editarMatch) {
     const idx = parseInt(editarMatch[1]) - 1;
     const campo = editarMatch[2].toLowerCase();
     const valor = msg.match(/^editar\s*#?\d+\s+\w+\s+(.+)/i)?.[1]?.trim();
     const tasks = await Task.find({ phone, status: { $ne: "completada" } }).sort({ due: 1 });
-
     if (!tasks[idx]) return `No encontré la tarea #${editarMatch[1]}. Escribe *lista* para ver tus tareas.`;
-
     const task = tasks[idx];
     let update = {};
     let confirmacion = "";
-
     if (campo === "fecha") {
       const nuevaFecha = parseDueDate(valor);
       update = { due: nuevaFecha };
@@ -198,9 +221,8 @@ async function parseMessage(msg, phone) {
       update = { title: valor };
       confirmacion = `✏️ Nombre actualizado a: "${valor}"`;
     } else {
-      return `Campo no reconocido. Puedes editar:\n• *fecha* — nueva fecha\n• *hora* — nueva hora\n• *prioridad* — alta, media o baja\n• *cliente* — nuevo cliente\n• *nombre* — nuevo nombre`;
+      return `Campo no reconocido. Puedes editar:\n• *fecha*\n• *hora*\n• *prioridad*\n• *cliente*\n• *nombre*`;
     }
-
     await Task.findByIdAndUpdate(task._id, update);
     return `${confirmacion}\n\nTarea: "${task.title}"\nEscribe *lista* para ver tus tareas.`;
   }
@@ -208,6 +230,12 @@ async function parseMessage(msg, phone) {
   // Nueva tarea
   if (lower.startsWith("nueva tarea")) {
     let raw = msg.replace(/^nueva tarea[:\s]*/i, "").trim();
+
+    // Extraer asignado (@nombre)
+    const asignadoMatch = raw.match(/asignar\s+(@\S+)/i);
+    const asignadoNombre = asignadoMatch ? asignadoMatch[1].toLowerCase() : "";
+    const asignadoPhone = asignadoNombre ? (EQUIPO[asignadoNombre] || "") : "";
+    raw = raw.replace(/asignar\s+@\S+/i, "").trim();
 
     const clienteMatch = raw.match(/#(\S+)/);
     const cliente = clienteMatch ? clienteMatch[1] : "";
@@ -240,17 +268,33 @@ async function parseMessage(msg, phone) {
     const due = parseDueDate(fechaRaw);
     const title = raw.replace(/,\s*$/, "").trim();
 
-    if (!title) return "No entendí el nombre de la tarea. Ejemplo:\n*nueva tarea: Audiencia Juzgado 21 CA 123/2025 #Costco 22 de abril de 2026 a las 10:00 prioridad alta*";
+    if (!title) return "No entendí el nombre de la tarea. Ejemplo:\n*nueva tarea: Audiencia #Costco 22 de abril de 2026 a las 10:00 prioridad alta*";
 
-    await Task.create({ phone, title, due, hora, priority, cliente, status: "pendiente" });
+    await Task.create({ phone, title, due, hora, priority, cliente,
+      asignado_a: asignadoPhone, asignado_nombre: asignadoNombre, status: "pendiente" });
 
     const horaStr = hora ? ` a las ${hora}` : "";
     const clienteStr = cliente ? ` #${cliente}` : "";
-    return (
+    let respuesta = (
       `✅ *Tarea agregada:*\n${title}${clienteStr}${horaStr}\n` +
-      `Prioridad: ${priority} | Vence: ${formatearFecha(due)}\n\n` +
-      `Escribe *lista* para ver todas tus tareas.`
+      `Prioridad: ${priority} | Vence: ${formatearFecha(due)}`
     );
+
+    // Notificar al asignado
+    if (asignadoPhone) {
+      try {
+        await sendWhatsApp(asignadoPhone,
+          `📌 *Se te asignó una tarea:*\n${title}${clienteStr}${horaStr}\n` +
+          `Prioridad: ${priority} | Vence: ${formatearFecha(due)}\n\nEscribe *lista* para ver tus tareas.`
+        );
+        respuesta += `\n\nNotificación enviada a ${asignadoNombre} ✓`;
+      } catch (e) {
+        respuesta += `\n\n⚠️ No se pudo notificar a ${asignadoNombre}.`;
+      }
+    }
+
+    respuesta += `\n\nEscribe *lista* para ver todas tus tareas.`;
+    return respuesta;
   }
 
   // Clientes
@@ -267,15 +311,18 @@ async function parseMessage(msg, phone) {
       `🤖 *Comandos disponibles:*\n\n` +
       `• *lista* — ver tareas pendientes\n` +
       `• *lista #García* — tareas de un cliente\n` +
+      `• *completadas* — ver historial de tareas completadas\n` +
+      `• *completadas #García* — completadas de un cliente\n` +
       `• *nueva tarea: [nombre]* — agregar tarea\n` +
-      `• *nueva tarea: Audiencia Juzgado 21 CA 123/2025 #Costco 22 de abril de 2026 a las 10:00 prioridad alta*\n` +
+      `• *nueva tarea: contrato #García para el viernes a las 10:00 prioridad alta*\n` +
+      `• *nueva tarea: contrato #García para el viernes asignar @Gabriela prioridad alta*\n` +
       `• *listo #2* — marcar tarea como completada\n` +
       `• *eliminar #2* — borrar una tarea\n` +
-      `• *editar #2 fecha 25 de abril de 2026* — cambiar fecha\n` +
-      `• *editar #2 hora 11:00* — cambiar hora\n` +
-      `• *editar #2 prioridad alta* — cambiar prioridad\n` +
-      `• *editar #2 cliente García* — cambiar cliente\n` +
-      `• *editar #2 nombre Nuevo nombre* — cambiar nombre\n` +
+      `• *editar #2 fecha 25 de abril de 2026*\n` +
+      `• *editar #2 hora 11:00*\n` +
+      `• *editar #2 prioridad alta*\n` +
+      `• *editar #2 cliente García*\n` +
+      `• *editar #2 nombre Nuevo nombre*\n` +
       `• *clientes* — ver clientes con tareas activas\n` +
       `• *ayuda* — ver estos comandos`
     );
@@ -307,7 +354,7 @@ cron.schedule("*/10 * * * *", () => {
   }).on("error", (e) => console.error("Keep-alive error:", e.message));
 });
 
-// ─── Recordatorio 8am CDMX ───────────────────────────────────────────────────
+// ─── Recordatorio diario 8am CDMX ────────────────────────────────────────────
 cron.schedule("0 13 * * *", async () => {
   console.log("Enviando recordatorios matutinos...");
   const today = fechaHoyMexico();
@@ -321,6 +368,29 @@ cron.schedule("0 13 * * *", async () => {
       `☀️ *Buenos días! Tus tareas para hoy:*\n\n` +
       tasks.map((t, i) => formatTask(t, i)).join("\n") +
       `\n\nEscribe *lista* para ver todas tus tareas.`;
+    try { await sendWhatsApp(phone, msg); } catch (e) { console.error("Error:", e.message); }
+  }
+}, { timezone: "America/Mexico_City" });
+
+// ─── Resumen semanal — lunes 8am CDMX ────────────────────────────────────────
+cron.schedule("0 13 * * 1", async () => {
+  console.log("Enviando resumen semanal...");
+  const hoy = new Date(fechaHoyMexico());
+  const finSemana = new Date(hoy);
+  finSemana.setDate(hoy.getDate() + 6);
+  const finStr = finSemana.toISOString().split("T")[0];
+
+  const phones = await Task.distinct("phone", { status: { $ne: "completada" } });
+  for (const phone of phones) {
+    const tasks = await Task.find({
+      phone, status: { $ne: "completada" },
+      due: { $gte: fechaHoyMexico(), $lte: finStr },
+    }).sort({ due: 1, hora: 1 });
+    if (tasks.length === 0) continue;
+    const msg =
+      `📅 *Resumen semanal — semana del ${formatearFecha(fechaHoyMexico())}:*\n\n` +
+      tasks.map((t, i) => formatTask(t, i)).join("\n") +
+      `\n\n¡Buena semana! Escribe *lista* para ver todas tus tareas.`;
     try { await sendWhatsApp(phone, msg); } catch (e) { console.error("Error:", e.message); }
   }
 }, { timezone: "America/Mexico_City" });
